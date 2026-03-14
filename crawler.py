@@ -5,6 +5,7 @@ import os
 import random
 import re
 import time
+from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -102,6 +103,81 @@ def build_page_url(base_url, page_num):
 def extract_page_num(url):
     match = re.search(r"[?&]page=(\d+)", url)
     return int(match.group(1)) if match else 1
+
+
+def is_topic_url(url):
+    path = (urlparse(url).path or "").rstrip("/")
+    return bool(re.search(r"/topic/\d+$", path))
+
+
+def discover_list_pages(start_url, total_pages=None):
+    """优先使用站点真实分页链接，避免把帖子页误当作列表页。"""
+    visited = set()
+    pages = []
+    queue = [start_url]
+
+    while queue:
+        current_url = queue.pop(0)
+        if current_url in visited:
+            continue
+        visited.add(current_url)
+
+        resp = request(current_url)
+        if not resp:
+            logger.warning("分页发现失败：%s", current_url)
+            continue
+
+        real_url = resp.url or current_url
+        if is_topic_url(real_url):
+            logger.warning("检测到帖子页而非列表页：%s", real_url)
+            continue
+
+        pages.append(real_url)
+        if total_pages and len(pages) >= total_pages:
+            break
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        candidate_links = []
+
+        for a in soup.select("a[href]"):
+            href = a.get("href", "").strip()
+            if not href:
+                continue
+
+            full_url = urljoin(real_url, href)
+            parsed = urlparse(full_url)
+
+            if parsed.netloc and parsed.netloc != urlparse(BASE_DOMAIN).netloc:
+                continue
+            if is_topic_url(full_url):
+                continue
+
+            text = a.get_text(strip=True)
+            if (
+                "page=" in full_url
+                or "下一页" in text
+                or text.lower() == "next"
+                or text.isdigit()
+            ):
+                candidate_links.append(full_url)
+
+        # 按 page 参数排序，确保顺序稳定
+        for link in sorted(set(candidate_links), key=extract_page_num):
+            if link not in visited and link not in queue:
+                queue.append(link)
+
+    if pages:
+        # 去重并按页码排序
+        unique_pages = sorted(set(pages), key=extract_page_num)
+        if total_pages:
+            return unique_pages[:total_pages]
+        return unique_pages
+
+    # 分页发现失败时，退回固定 page= 规则
+    if total_pages is None:
+        total_pages = detect_total_pages(start_url)
+    start_page = extract_page_num(start_url)
+    return [build_page_url(start_url, i) for i in range(start_page, total_pages + 1)]
 
 
 # ======================
@@ -319,14 +395,9 @@ def crawl_page(page_url, thread_workers):
 # 主流程
 # ======================
 def crawl_pages(start_url, total_pages, page_threads, thread_workers):
-    start_page = extract_page_num(start_url)
     done_pages = load_progress()
-    all_pages = []
-
-    for i in range(start_page, total_pages + 1):
-        url = build_page_url(start_url, i)
-        if url not in done_pages:
-            all_pages.append(url)
+    discovered_pages = discover_list_pages(start_url, total_pages)
+    all_pages = [url for url in discovered_pages if url not in done_pages]
 
     logger.info("🧵 待爬 %s 页", len(all_pages))
 
