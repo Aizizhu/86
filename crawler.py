@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import os
 import re
 import time
@@ -21,6 +22,32 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 ILLEGAL_CHARACTERS_RE = re.compile(r"[\000-\010]|[\013-\014]|[\016-\037]")
+
+logger = logging.getLogger(__name__)
+
+
+def setup_logging(log_file, log_level):
+    level_name = (log_level or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    logger.setLevel(level)
+    logger.handlers.clear()
+
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    logger.propagate = False
+
+    logger.info("日志初始化完成，日志文件：%s，等级：%s", log_file, level_name)
 
 
 # ======================
@@ -91,7 +118,7 @@ def save_excel(data_list, filename="result.xlsx"):
         )
 
     wb.save(filename)
-    print(f"💾 批量写入 {len(data_list)} 条")
+    logger.info("💾 批量写入 %s 条", len(data_list))
 
 
 # ======================
@@ -104,7 +131,8 @@ def request(url):
         if not resp.encoding:
             resp.encoding = resp.apparent_encoding
         return resp
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        logger.exception("请求失败：%s", url, exc_info=exc)
         return None
 
 
@@ -131,6 +159,7 @@ def detect_total_pages(start_url):
 def parse_thread(url):
     resp = request(url)
     if not resp:
+        logger.warning("帖子抓取失败，响应为空：%s", url)
         return None
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -176,11 +205,11 @@ def parse_thread(url):
 # 抓列表页
 # ======================
 def crawl_page(page_url, thread_workers):
-    print(f"\n🚀 {page_url}")
+    logger.info("\n🚀 %s", page_url)
 
     resp = request(page_url)
     if not resp:
-        print("❌ 列表失败")
+        logger.error("❌ 列表失败：%s", page_url)
         return [], []
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -192,7 +221,7 @@ def crawl_page(page_url, thread_workers):
             links.append(BASE_DOMAIN + href)
 
     links = list(set(links))
-    print(f"📄 帖子数量 {len(links)}")
+    logger.info("📄 帖子数量 %s", len(links))
 
     results = []
     failed = []
@@ -213,7 +242,7 @@ def crawl_page(page_url, thread_workers):
     elapsed = time.time() - start_time
     speed = len(results) / elapsed if elapsed else 0
 
-    print(f"⚡ 速度 {speed:.2f} 帖子/秒")
+    logger.info("⚡ 速度 %.2f 帖子/秒", speed)
 
     return results, failed
 
@@ -231,7 +260,7 @@ def crawl_pages(start_url, total_pages, page_threads, thread_workers):
         if url not in done_pages:
             all_pages.append(url)
 
-    print(f"🧵 待爬 {len(all_pages)} 页")
+    logger.info("🧵 待爬 %s 页", len(all_pages))
 
     retry_queue = []
 
@@ -239,7 +268,7 @@ def crawl_pages(start_url, total_pages, page_threads, thread_workers):
         batch = all_pages[i : i + page_threads]
         batch_data = []
 
-        print(f"\n🔥 批次 {i // page_threads + 1}")
+        logger.info("\n🔥 批次 %s", i // page_threads + 1)
 
         with ThreadPoolExecutor(max_workers=page_threads) as executor:
             futures = {executor.submit(crawl_page, url, thread_workers): url for url in batch}
@@ -252,7 +281,7 @@ def crawl_pages(start_url, total_pages, page_threads, thread_workers):
 
         # 自动重试
         if retry_queue:
-            print(f"🔄 重试 {len(retry_queue)} 个失败帖子")
+            logger.warning("🔄 重试 %s 个失败帖子", len(retry_queue))
             retry_results = []
 
             with ThreadPoolExecutor(max_workers=thread_workers) as executor:
@@ -271,7 +300,7 @@ def crawl_pages(start_url, total_pages, page_threads, thread_workers):
 
         save_progress(done_pages)
 
-        print("✅ 批次完成")
+        logger.info("✅ 批次完成")
         time.sleep(1)
 
 
@@ -284,11 +313,14 @@ def main():
     parser.add_argument("--total-pages", type=int)
     parser.add_argument("--page-threads", type=int, default=4)
     parser.add_argument("--threads", type=int, default=6)
+    parser.add_argument("--log-file", default="crawler.log")
+    parser.add_argument("--log-level", default="INFO")
 
     args = parser.parse_args()
+    setup_logging(args.log_file, args.log_level)
 
     total_pages = args.total_pages or detect_total_pages(args.start_url)
-    print(f"📚 总页数 {total_pages}（起始 URL: {args.start_url}）")
+    logger.info("📚 总页数 %s（起始 URL: %s）", total_pages, args.start_url)
 
     crawl_pages(args.start_url, total_pages, args.page_threads, args.threads)
 
