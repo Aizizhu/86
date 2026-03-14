@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,9 +15,36 @@ BASE_DOMAIN = "https://xc8866.com"
 PROGRESS_FILE = "progress.json"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
     "Referer": BASE_DOMAIN,
 }
+
+FALLBACK_USER_AGENTS = [
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Version/17.3 Safari/605.1.15"
+    ),
+    (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+]
 
 session = requests.Session()
 session.headers.update(HEADERS)
@@ -124,16 +152,56 @@ def save_excel(data_list, filename="result.xlsx"):
 # ======================
 # 请求
 # ======================
-def request(url):
-    try:
-        resp = session.get(url, timeout=15)
-        resp.raise_for_status()
-        if not resp.encoding:
-            resp.encoding = resp.apparent_encoding
-        return resp
-    except requests.RequestException as exc:
-        logger.exception("请求失败：%s", url, exc_info=exc)
-        return None
+def request(url, retries=3):
+    last_exception = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            headers = {"User-Agent": random.choice(FALLBACK_USER_AGENTS)}
+            resp = session.get(url, timeout=15, headers=headers)
+            resp.raise_for_status()
+            if not resp.encoding:
+                resp.encoding = resp.apparent_encoding
+            return resp
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response else None
+            last_exception = exc
+
+            if status_code in {403, 429} and attempt < retries:
+                sleep_seconds = attempt * 1.5
+                logger.warning(
+                    "请求被拒绝（%s），第 %s/%s 次重试：%s",
+                    status_code,
+                    attempt,
+                    retries,
+                    url,
+                )
+                time.sleep(sleep_seconds)
+                continue
+
+            logger.exception("请求失败：%s", url, exc_info=exc)
+            return None
+        except requests.RequestException as exc:
+            last_exception = exc
+
+            if attempt < retries:
+                sleep_seconds = attempt
+                logger.warning(
+                    "请求异常，第 %s/%s 次重试：%s（%s）",
+                    attempt,
+                    retries,
+                    url,
+                    exc,
+                )
+                time.sleep(sleep_seconds)
+                continue
+
+            logger.exception("请求失败：%s", url, exc_info=exc)
+            return None
+
+    if last_exception:
+        logger.exception("请求失败：%s", url, exc_info=last_exception)
+    return None
 
 
 def detect_total_pages(start_url):
@@ -210,7 +278,7 @@ def crawl_page(page_url, thread_workers):
     resp = request(page_url)
     if not resp:
         logger.error("❌ 列表失败：%s", page_url)
-        return [], []
+        return [], [], False
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -244,7 +312,7 @@ def crawl_page(page_url, thread_workers):
 
     logger.info("⚡ 速度 %.2f 帖子/秒", speed)
 
-    return results, failed
+    return results, failed, True
 
 
 # ======================
@@ -263,6 +331,7 @@ def crawl_pages(start_url, total_pages, page_threads, thread_workers):
     logger.info("🧵 待爬 %s 页", len(all_pages))
 
     retry_queue = []
+    retry_pages = []
 
     for i in range(0, len(all_pages), page_threads):
         batch = all_pages[i : i + page_threads]
@@ -274,10 +343,34 @@ def crawl_pages(start_url, total_pages, page_threads, thread_workers):
             futures = {executor.submit(crawl_page, url, thread_workers): url for url in batch}
 
             for future in as_completed(futures):
-                page_data, failed = future.result()
+                page_data, failed, page_ok = future.result()
                 batch_data.extend(page_data)
                 retry_queue.extend(failed)
-                done_pages.add(futures[future])
+
+                page_url = futures[future]
+                if page_ok:
+                    done_pages.add(page_url)
+                else:
+                    retry_pages.append(page_url)
+
+        if retry_pages:
+            logger.warning("🔁 重试 %s 个失败列表页", len(retry_pages))
+
+            with ThreadPoolExecutor(max_workers=page_threads) as executor:
+                futures = {
+                    executor.submit(crawl_page, url, thread_workers): url
+                    for url in retry_pages
+                }
+
+                for future in as_completed(futures):
+                    page_data, failed, page_ok = future.result()
+                    batch_data.extend(page_data)
+                    retry_queue.extend(failed)
+
+                    if page_ok:
+                        done_pages.add(futures[future])
+
+            retry_pages.clear()
 
         # 自动重试
         if retry_queue:
