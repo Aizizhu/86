@@ -44,6 +44,18 @@ pip install -r requirements.txt
 pip install requests beautifulsoup4 openpyxl
 ```
 
+## Windows 一键运行（run.bat）
+
+项目根目录新增了 `run.bat`，可直接双击运行：
+
+- 首次运行：自动创建 `.venv`、激活环境并安装 `requirements.txt` 依赖。
+- 后续运行：检测到已存在 `.venv` 后会直接激活并启动脚本。
+- 支持透传参数，例如：
+
+```bat
+run.bat --start-url "https://xc8866.com/?page=1" --total-pages 10
+```
+
 ## 3. 运行脚本
 
 ```bash
