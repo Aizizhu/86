@@ -44,6 +44,11 @@ def build_page_url(base_url, page_num):
     return base_url + f"?page={page_num}"
 
 
+def extract_page_num(url):
+    match = re.search(r"[?&]page=(\d+)", url)
+    return int(match.group(1)) if match else 1
+
+
 # ======================
 # 进度记录
 # ======================
@@ -96,9 +101,28 @@ def request(url):
     try:
         resp = session.get(url, timeout=15)
         resp.raise_for_status()
+        if not resp.encoding:
+            resp.encoding = resp.apparent_encoding
         return resp
     except requests.RequestException:
         return None
+
+
+def detect_total_pages(start_url):
+    resp = request(start_url)
+    if not resp:
+        return extract_page_num(start_url)
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    page_numbers = [extract_page_num(start_url)]
+
+    for a in soup.select("a[href*='page=']"):
+        href = a.get("href", "")
+        if href.startswith("/"):
+            href = BASE_DOMAIN + href
+        page_numbers.append(extract_page_num(href))
+
+    return max(page_numbers) if page_numbers else extract_page_num(start_url)
 
 
 # ======================
@@ -198,10 +222,11 @@ def crawl_page(page_url, thread_workers):
 # 主流程
 # ======================
 def crawl_pages(start_url, total_pages, page_threads, thread_workers):
+    start_page = extract_page_num(start_url)
     done_pages = load_progress()
     all_pages = []
 
-    for i in range(1, total_pages + 1):
+    for i in range(start_page, total_pages + 1):
         url = build_page_url(start_url, i)
         if url not in done_pages:
             all_pages.append(url)
@@ -254,15 +279,18 @@ def crawl_pages(start_url, total_pages, page_threads, thread_workers):
 # main
 # ======================
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--start-url", required=True)
-    parser.add_argument("--total-pages", type=int, required=True)
+    parser = argparse.ArgumentParser(description="从 xc8866 列表页开始爬取帖子信息")
+    parser.add_argument("--start-url", default="https://xc8866.com/?page=1")
+    parser.add_argument("--total-pages", type=int)
     parser.add_argument("--page-threads", type=int, default=4)
     parser.add_argument("--threads", type=int, default=6)
 
     args = parser.parse_args()
 
-    crawl_pages(args.start_url, args.total_pages, args.page_threads, args.threads)
+    total_pages = args.total_pages or detect_total_pages(args.start_url)
+    print(f"📚 总页数 {total_pages}（起始 URL: {args.start_url}）")
+
+    crawl_pages(args.start_url, total_pages, args.page_threads, args.threads)
 
 
 if __name__ == "__main__":
