@@ -1,90 +1,35 @@
-# xc8866 爬虫使用说明
+# XC8866 帖子爬虫
 
-这是一个用于抓取 `xc8866` 列表页帖子信息并导出到 Excel 的脚本。
+按帖子 ID 区间抓取 `https://xc8866.com/topic/{id}` 页面，并导出为 Excel。
 
-## 功能简介
+## 功能
 
-- 从指定列表页开始按分页抓取帖子。
-- 自动解析标题、价格、地址、QQ、微信、电话、正文和链接。
-- 结果写入 `result.xlsx`。
-- 使用 `progress.json` 记录已完成页面，支持中断后继续。
+- 输入起始 ID、结束 ID、线程数后并发抓取。
+- 自动提取字段：标题、价格、地址、QQ、微信、电话、正文、链接。
+- 每抓取 100 条自动保存一次，结束后再保存完整结果到 `xc8866.xlsx`。
 
-## 环境要求
+## 环境
 
 - Python 3.9+
-- pip
 
-## 1. 创建并激活虚拟环境（venv）
-
-在项目根目录执行：
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-> Windows PowerShell 可使用：
->
-> ```powershell
-> py -m venv .venv
-> .\.venv\Scripts\Activate.ps1
-> ```
-
-## 2. 安装依赖库
-
-### 方式 A：使用 requirements.txt（推荐）
+安装依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 方式 B：手动安装
-
-```bash
-pip install requests beautifulsoup4 openpyxl
-```
-
-## Windows 一键运行（run.bat）
-
-项目根目录新增了 `run.bat`，可直接双击运行：
-
-- 首次运行：自动创建 `.venv`、激活环境并安装 `requirements.txt` 依赖。
-- 后续运行：检测到已存在 `.venv` 后会直接激活并启动脚本。
-- 支持透传参数，例如：
-
-```bat
-run.bat --start-url "https://xc8866.com/?page=1" --total-pages 10
-```
-
-## 3. 运行脚本
+## 运行
 
 ```bash
 python crawler.py
 ```
 
-常用参数：
+脚本会交互式询问：
 
-```bash
-python crawler.py \
-  --start-url "https://xc8866.com/?page=1" \
-  --total-pages 20 \
-  --page-threads 4 \
-  --threads 6
-```
+- 起始 ID（如 `84750`）
+- 结束 ID（如 `182467`）
+- 线程数（建议 `20`）
 
-参数说明：
+## 输出
 
-- `--start-url`：起始列表页 URL。
-- `--total-pages`：总页数；不传时自动探测。
-- `--page-threads`：列表页并发数（批次并发）。
-- `--threads`：帖子详情页并发数。
-
-## 输出文件
-
-- `result.xlsx`：抓取结果。
-- `progress.json`：已完成页面进度。
-
-## 常见问题
-
-- 如果出现编码异常或网络超时，可降低并发参数：`--page-threads` 和 `--threads`。
-- 若想重新全量抓取，可删除 `progress.json` 后重跑。
+- `xc8866.xlsx`
