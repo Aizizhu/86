@@ -1,493 +1,142 @@
-import argparse
-import json
-import logging
-import os
-import random
 import re
-import time
-from urllib.parse import urljoin, urlparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from openpyxl import Workbook, load_workbook
-
-BASE_DOMAIN = "https://xc8866.com"
-PROGRESS_FILE = "progress.json"
-
-HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Upgrade-Insecure-Requests": "1",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Referer": BASE_DOMAIN,
-}
-
-FALLBACK_USER_AGENTS = [
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
-    ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-        "Version/17.3 Safari/605.1.15"
-    ),
-    (
-        "Mozilla/5.0 (X11; Linux x86_64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-]
-
-session = requests.Session()
-session.headers.update(HEADERS)
-
-ILLEGAL_CHARACTERS_RE = re.compile(r"[\000-\010]|[\013-\014]|[\016-\037]")
-
-logger = logging.getLogger(__name__)
-
-
-def setup_logging(log_file, log_level):
-    level_name = (log_level or "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-
-    logger.setLevel(level)
-    logger.handlers.clear()
-
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(level)
-    console_handler.setFormatter(formatter)
-
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setLevel(level)
-    file_handler.setFormatter(formatter)
-
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
-    logger.propagate = False
-
-    logger.info("日志初始化完成，日志文件：%s，等级：%s", log_file, level_name)
-
-
-# ======================
-# 文本清理
-# ======================
-def clean_text(text):
-    if not text:
-        return ""
-    return ILLEGAL_CHARACTERS_RE.sub("", str(text))
-
-
-# ======================
-# 固定分页替换
-# ======================
-def build_page_url(base_url, page_num):
-    if "page=" in base_url:
-        return re.sub(r"page=\d+", f"page={page_num}", base_url)
-
-    if "?" in base_url:
-        return base_url + f"&page={page_num}"
-    return base_url + f"?page={page_num}"
-
-
-def extract_page_num(url):
-    match = re.search(r"[?&]page=(\d+)", url)
-    return int(match.group(1)) if match else 1
-
-
-def is_topic_url(url):
-    path = (urlparse(url).path or "").rstrip("/")
-    return bool(re.search(r"/topic/\d+$", path))
-
-
-def discover_list_pages(start_url, total_pages=None):
-    """优先使用站点真实分页链接，避免把帖子页误当作列表页。"""
-    visited = set()
-    pages = []
-    queue = [start_url]
-
-    while queue:
-        current_url = queue.pop(0)
-        if current_url in visited:
-            continue
-        visited.add(current_url)
-
-        resp = request(current_url)
-        if not resp:
-            logger.warning("分页发现失败：%s", current_url)
-            continue
-
-        real_url = resp.url or current_url
-        if is_topic_url(real_url):
-            logger.warning("检测到帖子页而非列表页：%s", real_url)
-            continue
-
-        pages.append(real_url)
-        if total_pages and len(pages) >= total_pages:
-            break
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        candidate_links = []
-
-        for a in soup.select("a[href]"):
-            href = a.get("href", "").strip()
-            if not href:
-                continue
-
-            full_url = urljoin(real_url, href)
-            parsed = urlparse(full_url)
-
-            if parsed.netloc and parsed.netloc != urlparse(BASE_DOMAIN).netloc:
-                continue
-            if is_topic_url(full_url):
-                continue
-
-            text = a.get_text(strip=True)
-            if (
-                "page=" in full_url
-                or "下一页" in text
-                or text.lower() == "next"
-                or text.isdigit()
-            ):
-                candidate_links.append(full_url)
-
-        # 按 page 参数排序，确保顺序稳定
-        for link in sorted(set(candidate_links), key=extract_page_num):
-            if link not in visited and link not in queue:
-                queue.append(link)
-
-    if pages:
-        # 去重并按页码排序
-        unique_pages = sorted(set(pages), key=extract_page_num)
-        if total_pages:
-            return unique_pages[:total_pages]
-        return unique_pages
-
-    # 分页发现失败时，退回固定 page= 规则
-    if total_pages is None:
-        total_pages = detect_total_pages(start_url)
-    start_page = extract_page_num(start_url)
-    return [build_page_url(start_url, i) for i in range(start_page, total_pages + 1)]
-
-
-# ======================
-# 进度记录
-# ======================
-def load_progress():
-    if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    return set()
-
-
-def save_progress(done_pages):
-    with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(done_pages), f)
-
-
-# ======================
-# Excel 写入（批量）
-# ======================
-def save_excel(data_list, filename="result.xlsx"):
-    if os.path.exists(filename):
-        wb = load_workbook(filename)
-        ws = wb.active
-    else:
-        wb = Workbook()
-        ws = wb.active
-        ws.append(["标题", "价格", "地址", "QQ", "微信", "电话", "正文", "链接"])
-
-    for data in data_list:
-        ws.append(
-            [
-                clean_text(data["标题"]),
-                clean_text(data["价格"]),
-                clean_text(data["地址"]),
-                clean_text(data["QQ"]),
-                clean_text(data["微信"]),
-                clean_text(data["电话"]),
-                clean_text(data["正文"]),
-                clean_text(data["链接"]),
-            ]
-        )
-
-    wb.save(filename)
-    logger.info("💾 批量写入 %s 条", len(data_list))
-
-
-# ======================
-# 请求
-# ======================
-def request(url, retries=3):
-    last_exception = None
-
-    for attempt in range(1, retries + 1):
-        try:
-            headers = {"User-Agent": random.choice(FALLBACK_USER_AGENTS)}
-            resp = session.get(url, timeout=15, headers=headers)
-            resp.raise_for_status()
-            if not resp.encoding:
-                resp.encoding = resp.apparent_encoding
-            return resp
-        except requests.HTTPError as exc:
-            status_code = exc.response.status_code if exc.response else None
-            last_exception = exc
-
-            if status_code in {403, 429} and attempt < retries:
-                sleep_seconds = attempt * 1.5
-                logger.warning(
-                    "请求被拒绝（%s），第 %s/%s 次重试：%s",
-                    status_code,
-                    attempt,
-                    retries,
-                    url,
-                )
-                time.sleep(sleep_seconds)
-                continue
-
-            logger.exception("请求失败：%s", url, exc_info=exc)
-            return None
-        except requests.RequestException as exc:
-            last_exception = exc
-
-            if attempt < retries:
-                sleep_seconds = attempt
-                logger.warning(
-                    "请求异常，第 %s/%s 次重试：%s（%s）",
-                    attempt,
-                    retries,
-                    url,
-                    exc,
-                )
-                time.sleep(sleep_seconds)
-                continue
-
-            logger.exception("请求失败：%s", url, exc_info=exc)
-            return None
-
-    if last_exception:
-        logger.exception("请求失败：%s", url, exc_info=last_exception)
-    return None
-
-
-def detect_total_pages(start_url):
-    resp = request(start_url)
-    if not resp:
-        return extract_page_num(start_url)
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    page_numbers = [extract_page_num(start_url)]
-
-    for a in soup.select("a[href*='page=']"):
-        href = a.get("href", "")
-        if href.startswith("/"):
-            href = BASE_DOMAIN + href
-        page_numbers.append(extract_page_num(href))
-
-    return max(page_numbers) if page_numbers else extract_page_num(start_url)
-
-
-# ======================
-# 解析帖子
-# ======================
-def parse_thread(url):
-    resp = request(url)
-    if not resp:
-        logger.warning("帖子抓取失败，响应为空：%s", url)
-        return None
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    title_tag = soup.find("h1")
-    title = title_tag.get_text(strip=True) if title_tag else "无标题"
-
-    price = qq = wechat = phone = address = ""
-
-    for tr in soup.select("tr"):
-        tds = tr.find_all("td")
-        if len(tds) >= 2:
-            key = tds[0].get_text(strip=True)
-            value = tds[1].get_text(strip=True)
-
-            if "价格" in key:
-                price = value
-            elif "地址" in key:
-                address = value
-            elif "QQ" in key:
-                qq = value
-            elif "微信" in key:
-                wechat = value
-            elif "电话" in key or "手机" in key:
-                phone = value
-
-    content_div = soup.select_one("div.topic-content-detail")
-    content = content_div.get_text("\n", strip=True) if content_div else ""
-
-    return {
-        "标题": title,
-        "价格": price,
-        "地址": address,
-        "QQ": qq,
-        "微信": wechat,
-        "电话": phone,
-        "正文": content,
-        "链接": url,
-    }
-
-
-# ======================
-# 抓列表页
-# ======================
-def crawl_page(page_url, thread_workers):
-    logger.info("\n🚀 %s", page_url)
-
-    resp = request(page_url)
-    if not resp:
-        logger.error("❌ 列表失败：%s", page_url)
-        return [], [], False
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    links = []
-    for a in soup.select("a[href^='/topic/']"):
-        href = a["href"]
-        if re.match(r"^/topic/\d+$", href):
-            links.append(BASE_DOMAIN + href)
-
-    links = list(set(links))
-    logger.info("📄 帖子数量 %s", len(links))
-
-    results = []
-    failed = []
-
-    start_time = time.time()
-
-    with ThreadPoolExecutor(max_workers=thread_workers) as executor:
-        futures = {executor.submit(parse_thread, link): link for link in links}
-
-        for future in as_completed(futures):
-            data = future.result()
-
-            if data:
-                results.append(data)
-            else:
-                failed.append(futures[future])
-
-    elapsed = time.time() - start_time
-    speed = len(results) / elapsed if elapsed else 0
-
-    logger.info("⚡ 速度 %.2f 帖子/秒", speed)
-
-    return results, failed, True
-
-
-# ======================
-# 主流程
-# ======================
-def crawl_pages(start_url, total_pages, page_threads, thread_workers):
-    done_pages = load_progress()
-    discovered_pages = discover_list_pages(start_url, total_pages)
-    all_pages = [url for url in discovered_pages if url not in done_pages]
-
-    logger.info("🧵 待爬 %s 页", len(all_pages))
-
-    retry_queue = []
-    retry_pages = []
-
-    for i in range(0, len(all_pages), page_threads):
-        batch = all_pages[i : i + page_threads]
-        batch_data = []
-
-        logger.info("\n🔥 批次 %s", i // page_threads + 1)
-
-        with ThreadPoolExecutor(max_workers=page_threads) as executor:
-            futures = {executor.submit(crawl_page, url, thread_workers): url for url in batch}
-
-            for future in as_completed(futures):
-                page_data, failed, page_ok = future.result()
-                batch_data.extend(page_data)
-                retry_queue.extend(failed)
-
-                page_url = futures[future]
-                if page_ok:
-                    done_pages.add(page_url)
-                else:
-                    retry_pages.append(page_url)
-
-        if retry_pages:
-            logger.warning("🔁 重试 %s 个失败列表页", len(retry_pages))
-
-            with ThreadPoolExecutor(max_workers=page_threads) as executor:
-                futures = {
-                    executor.submit(crawl_page, url, thread_workers): url
-                    for url in retry_pages
-                }
-
-                for future in as_completed(futures):
-                    page_data, failed, page_ok = future.result()
-                    batch_data.extend(page_data)
-                    retry_queue.extend(failed)
-
-                    if page_ok:
-                        done_pages.add(futures[future])
-
-            retry_pages.clear()
-
-        # 自动重试
-        if retry_queue:
-            logger.warning("🔄 重试 %s 个失败帖子", len(retry_queue))
-            retry_results = []
-
-            with ThreadPoolExecutor(max_workers=thread_workers) as executor:
-                futures = [executor.submit(parse_thread, url) for url in retry_queue]
-
-                for future in as_completed(futures):
-                    data = future.result()
-                    if data:
-                        retry_results.append(data)
-
-            batch_data.extend(retry_results)
-            retry_queue.clear()
-
-        if batch_data:
-            save_excel(batch_data)
-
-        save_progress(done_pages)
-
-        logger.info("✅ 批次完成")
-        time.sleep(1)
-
-
-# ======================
-# main
-# ======================
-def main():
-    parser = argparse.ArgumentParser(description="从 xc8866 列表页开始爬取帖子信息")
-    parser.add_argument("--start-url", default="https://xc8866.com/?page=1")
-    parser.add_argument("--total-pages", type=int)
-    parser.add_argument("--page-threads", type=int, default=4)
-    parser.add_argument("--threads", type=int, default=6)
-    parser.add_argument("--log-file", default="crawler.log")
-    parser.add_argument("--log-level", default="INFO")
-
-    args = parser.parse_args()
-    setup_logging(args.log_file, args.log_level)
-
-    total_pages = args.total_pages or detect_total_pages(args.start_url)
-    logger.info("📚 总页数 %s（起始 URL: %s）", total_pages, args.start_url)
-
-    crawl_pages(args.start_url, total_pages, args.page_threads, args.threads)
-
-
-if __name__ == "__main__":
-    main()
+
+print("==============================")
+print("XC8866 帖子爬虫（稳定版）")
+print("==============================")
+
+start_id = int(input("起始ID(如84750): "))
+end_id = int(input("结束ID(如182467): "))
+threads = input("线程数(默认12): ")
+
+if threads.strip() == "":
+    threads = 12
+else:
+    threads = int(threads)
+
+headers = {"User-Agent": "Mozilla/5.0"}
+
+lock = threading.Lock()
+
+save_file = "xc8866帖子.xlsx"
+fail_file = "retry.txt"
+
+results = []
+visited = set()
+
+# 读取已存在数据，实现断点续爬
+try:
+    old = pd.read_excel(save_file)
+    visited = set(old["链接"].tolist())
+    results = old.to_dict("records")
+    print("已加载历史数据:", len(results))
+except Exception:
+    pass
+
+
+def extract_info(text):
+    price = ""
+    address = ""
+    qq = ""
+    wechat = ""
+    phone = ""
+
+    m = re.search(r"价格[:： ]?([^\n ]+)", text)
+    if m:
+        price = m.group(1)
+
+    m = re.search(r"地址[:： ]?([^\n]+)", text)
+    if m:
+        address = m.group(1)
+
+    m = re.search(r"QQ[:： ]?([0-9]{5,12})", text)
+    if m:
+        qq = m.group(1)
+
+    m = re.search(r"微信[:： ]?([a-zA-Z0-9_-]+)", text)
+    if m:
+        wechat = m.group(1)
+
+    m = re.search(r"1[3-9][0-9]{9}", text)
+    if m:
+        phone = m.group(0)
+
+    return price, address, qq, wechat, phone
+
+
+def save_excel():
+    df = pd.DataFrame(results)
+    df.to_excel(save_file, index=False)
+
+
+def crawl(tid):
+    url = f"https://xc8866.com/topic/{tid:06d}"
+
+    if url in visited:
+        return
+
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+
+        if r.status_code != 200:
+            return
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        title_tag = soup.find("h1")
+
+        if not title_tag:
+            return
+
+        title = title_tag.text.strip()
+
+        text = soup.get_text("\n")
+
+        price, address, qq, wechat, phone = extract_info(text)
+
+        data = {
+            "标题": title,
+            "价格": price,
+            "地址": address,
+            "QQ": qq,
+            "微信": wechat,
+            "电话": phone,
+            "正文": text.strip(),
+            "链接": url,
+        }
+
+        with lock:
+            results.append(data)
+            visited.add(url)
+
+            count = len(results)
+
+            print("完成:", tid, "总:", count)
+
+            if count % 100 == 0:
+                save_excel()
+                print("自动保存:", count)
+
+    except Exception:
+        with open(fail_file, "a", encoding="utf8") as f:
+            f.write(str(tid) + "\n")
+
+        print("失败:", tid)
+
+
+print("\n===== 开始爬取 =====\n")
+
+ids = range(start_id, end_id + 1)
+
+with ThreadPoolExecutor(max_workers=threads) as pool:
+    pool.map(crawl, ids)
+
+save_excel()
+
+print("\n===== 爬取完成 =====")
+print("数据保存:", save_file)
