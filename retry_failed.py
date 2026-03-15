@@ -4,6 +4,7 @@ import pandas as pd
 import time
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
+import re
 
 print("==============================")
 print("XC8866 失败链接重试爬虫")
@@ -87,11 +88,24 @@ def extract_content(soup):
 
 def save_excel():
 
-    df = pd.DataFrame(results)
+    cleaned_results = [
+        dict(map(lambda item: (item[0], clean_data(item[1])), item.items()))
+        for item in results
+    ]
+
+    df = pd.DataFrame(cleaned_results)
 
     df.to_excel(save_file, index=False)
 
     print(f"\n💾 已保存 {len(results)} 条数据\n")
+
+
+def clean_data(value):
+
+    if isinstance(value, str):
+        return re.sub(r'[^\x20-\x7E]', '', value)
+
+    return value
 
 
 def log_retry_fail(url):
