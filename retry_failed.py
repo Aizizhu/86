@@ -6,37 +6,32 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 
 print("==============================")
-print("XC8866 监控版爬虫")
+print("XC8866 失败链接重试爬虫")
 print("==============================")
 
-start_id = int(input("起始ID(如84750): "))
-end_id = int(input("结束ID(如182467): "))
-
 try:
-    threads = int(input("线程数(默认20): ") or 20)
+    threads = int(input("线程数(默认10): ") or 10)
 except:
-    threads = 20
+    threads = 10
+
+failed_file = "failed_links.txt"
+retry_fail_file = "failed_retry_failed.txt"
+save_file = "retry_result.xlsx"
 
 scraper = cloudscraper.create_scraper()
 
 lock = threading.Lock()
 
 results = []
-visited = set()
-
 success_count = 0
 fail_count = 0
 
-total_tasks = end_id - start_id + 1
-
 start_time = time.time()
 
-save_file = "xc8866.xlsx"
-failed_file = "failed_links.txt"  # 文件名用于记录失败的链接
 
-
-# 解析表格信息
+# 解析表格
 def extract_info(soup):
+
     price = ""
     address = ""
     qq = ""
@@ -46,6 +41,7 @@ def extract_info(soup):
     rows = soup.find_all("tr")
 
     for row in rows:
+
         tds = row.find_all("td")
 
         if len(tds) != 2:
@@ -74,11 +70,13 @@ def extract_info(soup):
 
 # 解析正文
 def extract_content(soup):
+
     content_list = []
 
     ps = soup.find_all("p")
 
     for p in ps:
+
         text = p.get_text(strip=True)
 
         if text:
@@ -87,36 +85,39 @@ def extract_content(soup):
     return "\n".join(content_list)
 
 
-# 保存Excel
 def save_excel():
+
     df = pd.DataFrame(results)
+
     df.to_excel(save_file, index=False)
+
     print(f"\n💾 已保存 {len(results)} 条数据\n")
 
 
-# 记录失败的链接到文本文件
-def log_failed_url(url):
-    with open(failed_file, "a", encoding="utf-8") as file:
-        file.write(url + "\n")
+def log_retry_fail(url):
+
+    with open(retry_fail_file, "a", encoding="utf-8") as f:
+
+        f.write(url + "\n")
 
 
-def crawl(tid):
+def crawl(url):
+
     global success_count, fail_count
 
-    url = f"https://xc8866.com/topic/{tid:06d}"
-
     try:
+
         r = scraper.get(url, timeout=15)
 
         if r.status_code != 200:
-            raise Exception(f"Status Code: {r.status_code}")
+            raise Exception("status error")
 
         soup = BeautifulSoup(r.text, "html.parser")
 
         title_tag = soup.find("h1")
 
         if not title_tag:
-            raise Exception("No Title Found")
+            raise Exception("no title")
 
         title = title_tag.get_text(strip=True)
 
@@ -136,42 +137,44 @@ def crawl(tid):
         }
 
         with lock:
+
             results.append(data)
+
             success_count += 1
 
-            done = success_count + fail_count
-            progress = done / total_tasks * 100
             elapsed = time.time() - start_time
+
             speed = success_count / elapsed * 3600 if elapsed > 0 else 0
-            remain = (total_tasks - done) / (success_count / elapsed) if success_count > 0 else 0
 
-            print(
-                f"[成功] ID:{tid} | 成功:{success_count} | 失败:{fail_count} | "
-                f"进度:{progress:.2f}% | 速度:{speed:.0f}帖/小时 | "
-                f"剩余:{remain/3600:.2f}小时"
-            )
+            print(f"[成功] {url} | 成功:{success_count} | 失败:{fail_count} | 速度:{speed:.0f}/小时")
 
-            if success_count % 100 == 0:
+            if success_count % 50 == 0:
                 save_excel()
 
-    except Exception as e:
+    except:
+
         with lock:
+
             fail_count += 1
-            print(f"[失败] ID:{tid} | 失败总数:{fail_count} | 错误: {e}")
-            log_failed_url(url)  # 记录失败的链接
+
+            print(f"[再次失败] {url}")
+
+            log_retry_fail(url)
 
 
-print("\n===== 开始爬取 =====\n")
+print("\n读取失败链接...")
 
-ids = range(start_id, end_id + 1)
+with open(failed_file, "r", encoding="utf-8") as f:
 
-# 确保在程序开始时清空之前的失败链接记录
-with open(failed_file, "w", encoding="utf-8") as file:
-    file.write("")
+    urls = [i.strip() for i in f if i.strip()]
+
+print(f"需要重试 {len(urls)} 条\n")
 
 with ThreadPoolExecutor(max_workers=threads) as pool:
-    pool.map(crawl, ids)
+
+    pool.map(crawl, urls)
 
 save_excel()
 
-print("\n===== 爬取完成 =====")
+print("\n===== 重试完成 =====")
+print(f"成功:{success_count} 失败:{fail_count}")

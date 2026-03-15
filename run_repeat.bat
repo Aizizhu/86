@@ -47,7 +47,7 @@ if not exist "%ACTIVATE_BAT%" (
 )
 
 echo [INFO] 启动爬虫 ...
-python crawler.py %*
+python retry_failed.py %*
 set "EXIT_CODE=%errorlevel%"
 
 echo.
