@@ -1,12 +1,12 @@
-# XC8866 帖子爬虫
+# 帖子爬虫
 
-按帖子 ID 区间抓取 `https://xc8866.com/topic/{id}` 页面，并导出为 Excel。
+按帖子 ID 区间抓取 `https://example.com/topic/{id}` 页面，并导出为 Excel。
 
 ## 功能
 
 - 输入起始 ID、结束 ID、线程数后并发抓取。
 - 自动提取字段：标题、价格、地址、QQ、微信、电话、正文、链接。
-- 每抓取 100 条自动保存一次，结束后再保存完整结果到 `xc8866.xlsx`。
+- 每抓取 100 条自动保存一次，结束后再保存完整结果到 `posts.xlsx`。
 
 ## 环境
 
@@ -32,4 +32,4 @@ python crawler.py
 
 ## 输出
 
-- `xc8866.xlsx`
+- `posts.xlsx`
