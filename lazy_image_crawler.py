@@ -30,7 +30,7 @@ from openpyxl.drawing.image import Image as XLImage
 BASE_DOMAIN = "https://xc8866.com"
 BASE_URL = f"{BASE_DOMAIN}/topic/{{topic_id:06d}}"
 PROGRESS_FILE = "progress.json"
-IMAGE_DIR = "images"
+IMAGE_DIR = "img"
 HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": BASE_DOMAIN}
 DEFAULT_WAIT_SELECTOR = "img.el-image__preview, .topic-detail-image img, .el-image img"
 IMAGE_SELECTORS = (
@@ -342,12 +342,13 @@ def crawl_list_page(page_url: str) -> tuple[str, list[str], str | None]:
     return page_url, links, error
 
 
-def download_image(img_url: str, title: str, index: int, image_dir: Path) -> Path | None:
+def download_image(img_url: str, title: str, topic_id: str, index: int, image_dir: Path) -> Path | None:
     try:
-        image_dir.mkdir(parents=True, exist_ok=True)
+        topic_folder = image_dir / clean_filename(topic_id or "unknown")
+        topic_folder.mkdir(parents=True, exist_ok=True)
         suffix = Path(img_url.split("?", 1)[0]).suffix or ".jpg"
-        filename = clean_filename(f"{title}_{index}{suffix}")
-        path = image_dir / filename
+        filename = clean_filename(f"{index:02d}_{title}{suffix}")
+        path = topic_folder / filename
         if path.exists():
             return path
         response = session.get(img_url, timeout=15)
@@ -392,7 +393,7 @@ def save_excel_with_images(results: Sequence[TopicResult], filename: Path, image
             continue
         column = 9
         for index, image_url in enumerate(result.image_list, 1):
-            image_path = download_image(image_url, result.title, index, image_dir)
+            image_path = download_image(image_url, result.title, result.topic_id, index, image_dir)
             if not image_path:
                 continue
             try:
@@ -535,9 +536,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 
     parser.add_argument("--threads", type=int, default=6, help="Compatibility option; topic rendering stays sequential for browser stability.")
     parser.add_argument("--output", default="result.xlsx", help="Output .xlsx, .csv, or .json file.")
-    parser.add_argument("--image-dir", default=IMAGE_DIR, help="Downloaded image directory for embedded Excel mode.")
+    parser.add_argument("--image-dir", default=IMAGE_DIR, help="Downloaded image root directory. Images are saved under <image-dir>/<topic-id>/.")
     parser.add_argument("--failed-file", default="failed_links.txt", help="Failed topic URL output path.")
-    parser.add_argument("--embed-images", action="store_true", help="Download topic images and embed them into .xlsx output.")
+    parser.set_defaults(embed_images=True)
+    parser.add_argument("--embed-images", dest="embed_images", action="store_true", help="Download topic images and embed them into .xlsx output. Enabled by default.")
+    parser.add_argument("--no-embed-images", dest="embed_images", action="store_false", help="Do not download or embed images; write image URLs only.")
     parser.add_argument("--static-only", action="store_true", help="Do not render with Playwright; use static HTML fallback only.")
     parser.add_argument("--headful", action="store_true", help="Show the browser window for debugging.")
     parser.add_argument("--timeout", type=int, default=30_000, help="Per-page timeout in milliseconds.")

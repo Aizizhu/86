@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `crawler.py` | 按帖子 ID 区间批量抓取静态字段 | `xc8866.xlsx`、`failed_links.txt` |
 | `retry_failed.py` | 对 `crawler.py` 失败链接做二次重试 | `retry_result.xlsx`、`failed_retry_failed.txt` |
-| `lazy_image_crawler.py` | 抓取前端懒加载图片、分页列表页、图片下载/嵌入 Excel | `result.xlsx` / `.csv` / `.json`、`images/`、`failed_links.txt` |
+| `lazy_image_crawler.py` | 抓取前端懒加载图片、分页列表页、图片下载/嵌入 Excel | `result.xlsx` / `.csv` / `.json`、`img/{帖子ID}/`、`failed_links.txt` |
 
 如果你的目标是抓取帖子里的图片，尤其是类似下面这种由前端渲染出来的图片节点，建议优先使用 `lazy_image_crawler.py`：
 
@@ -98,14 +98,14 @@ python lazy_image_crawler.py --url https://xc8866.com/topic/192878 --output resu
 ### 3.4 抓单个帖子并下载图片、嵌入 Excel
 
 ```bash
-python lazy_image_crawler.py --url https://xc8866.com/topic/192878 --output result.xlsx --embed-images
+python lazy_image_crawler.py --url https://xc8866.com/topic/192878 --output result.xlsx
 ```
 
 说明：
 
-- 图片会下载到 `images/` 目录。
+- 图片会下载到 `img/{帖子ID}/` 目录，例如 `img/192878/01_标题.jpg`。
 - Excel 第 9 列开始会插入图片。
-- 如果只需要图片链接，不要加 `--embed-images`，速度会更快。
+- 默认会下载图片并插入 Excel；如果只需要图片链接，请加 `--no-embed-images`，速度会更快。
 
 ### 3.5 按帖子 ID 区间抓取
 
@@ -133,7 +133,7 @@ python lazy_image_crawler.py --url-file urls.txt --output result.csv
 适合从分类页、列表页批量发现帖子链接：
 
 ```bash
-python lazy_image_crawler.py --start-url https://xc8866.com/some/list/path --total-pages 10 --page-threads 4 --output result.xlsx --embed-images --resume
+python lazy_image_crawler.py --start-url https://xc8866.com/some/list/path --total-pages 10 --page-threads 4 --output result.xlsx --resume
 ```
 
 参数说明：
@@ -177,8 +177,9 @@ python lazy_image_crawler.py --url https://xc8866.com/topic/192878 --headful --o
 | `--start-id` / `--end-id` | 无 | 按帖子 ID 区间构造 URL。 |
 | `--start-url` / `--total-pages` | 无 | 从列表页分页发现帖子 URL。 |
 | `--output` | `result.xlsx` | 输出文件，支持 `.xlsx`、`.csv`、`.json`。 |
-| `--embed-images` | 关闭 | 下载图片并嵌入 `.xlsx`。 |
-| `--image-dir` | `images` | 图片下载目录。 |
+| `--embed-images` | 开启 | 下载图片并嵌入 `.xlsx`；默认开启。 |
+| `--no-embed-images` | 关闭 | 不下载/不嵌入图片，只写入图片 URL。 |
+| `--image-dir` | `img` | 图片下载根目录，按 `img/{帖子ID}/` 分目录保存。 |
 | `--image-limit` | `4` | 每个帖子最多保留的图片数量。 |
 | `--failed-file` | `failed_links.txt` | 失败帖子 URL 输出文件。 |
 | `--timeout` | `30000` | 单页超时时间，单位毫秒。 |
@@ -269,7 +270,7 @@ https://xc8866.com/topic/000123
 1. 执行 `pip install -r requirements.txt`。
 2. 执行 `playwright install chromium`。
 3. 用 `lazy_image_crawler.py` 抓单帖、ID 区间、URL 文件或列表页。
-4. 如需要图片嵌入 Excel，加 `--embed-images`。
+4. 默认会把图片下载到 `img/{帖子ID}/` 并插入 Excel；如只要 URL，加 `--no-embed-images`。
 5. 如目标站访问频繁失败，调大 `--topic-delay`、`--page-delay`、`--timeout`。
 
 ---
@@ -286,11 +287,11 @@ Playwright 浏览器渲染并发过高时更容易被目标站限制，也更容
 
 ### 抓取很慢怎么办？
 
-可以先不加 `--embed-images`，只导出图片 URL；确认结果稳定后再按需要下载图片。也可以降低抓取范围，分批运行。
+可以先加 `--no-embed-images`，只导出图片 URL；确认结果稳定后再使用默认嵌图模式下载图片。也可以降低抓取范围，分批运行。
 
 ### Excel 无法打开或图片显示异常怎么办？
 
-通常是图片下载不完整或源站返回了非图片内容。可以删除 `images/` 中对应文件后重跑，或先导出 `.csv` / `.json` 检查图片 URL。
+通常是图片下载不完整或源站返回了非图片内容。可以删除 `img/{帖子ID}/` 中对应文件后重跑，或先加 `--no-embed-images` 导出 `.csv` / `.json` 检查图片 URL。
 
 ---
 
