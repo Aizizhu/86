@@ -149,3 +149,78 @@ pip install -r requirements.txt
 - 线程数过大可能导致请求失败增多，建议逐步调优。
 - `crawler.py` 每次运行会清空 `failed_links.txt`，请在新任务前先备份旧失败记录（如需要）。
 - 目标站点结构变化时，字段提取逻辑可能需要调整。
+
+---
+
+## 8. 懒加载图片渲染爬虫 `lazy_image_crawler.py`
+
+`xc8866.com/topic/{id}` 的图片节点通常由前端渲染生成，例如页面内会出现类似：
+
+```html
+<div class="topic-detail-image">
+  <div class="el-image">
+    <img class="el-image__inner el-image__preview" src="https://...">
+  </div>
+</div>
+```
+
+这类节点不一定存在于第一次 HTTP 返回的静态 HTML 中，因此只用 `requests` / `cloudscraper` 可能抓不到图片。`lazy_image_crawler.py` 使用 Playwright 启动真实 Chromium：
+
+1. 打开帖子页面并等待 DOM 加载。
+2. 等待 `.topic-detail-image img`、`img.el-image__preview` 或 `.el-image img` 出现。
+3. 逐个滚动图片容器，触发懒加载。
+4. 提取 `src`、`data-src`、`data-original`、`data-lazy-src` 等图片地址。
+5. 输出标题、联系信息、正文、图片数量和图片 URL。
+6. 每抓完一个页面就增量保存一次，降低中途失败的数据损失。
+
+### 首次安装
+
+```bash
+pip install -r requirements.txt
+playwright install chromium
+```
+
+### 抓单个帖子
+
+```bash
+python lazy_image_crawler.py --url https://xc8866.com/topic/192878 --output lazy_image_results.xlsx
+```
+
+### 按 ID 区间抓取
+
+```bash
+python lazy_image_crawler.py --start-id 192878 --end-id 192900 --output lazy_image_results.xlsx
+```
+
+### 从 URL 文件抓取
+
+```bash
+python lazy_image_crawler.py --url-file urls.txt --output lazy_image_results.csv
+```
+
+### 调试模式
+
+如果需要观察浏览器实际加载过程，可以加 `--headful`：
+
+```bash
+python lazy_image_crawler.py --url https://xc8866.com/topic/192878 --headful --output lazy_image_results.json
+```
+
+### 输出字段
+
+- `topic_id`：帖子 ID
+- `url`：帖子链接
+- `ok`：是否抓取成功
+- `title`：标题
+- `price` / `address` / `qq` / `wechat` / `phone`：结构化信息
+- `content`：正文段落
+- `image_count`：图片数量
+- `image_urls`：图片地址，多个地址以换行分隔
+- `error`：失败原因
+
+### 可靠性建议
+
+- 首次运行必须执行 `playwright install chromium`，否则本机没有浏览器可用。
+- 如果页面加载慢，可调大超时时间，例如 `--timeout 60000`。
+- 如果目标站限制频繁访问，建议分批运行 ID 区间，避免持续高频请求。
+- 若只想保存图片链接，优先使用 `.csv` 或 `.json`，后续处理更方便。
